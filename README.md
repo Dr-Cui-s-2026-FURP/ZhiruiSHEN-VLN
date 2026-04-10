@@ -4,6 +4,8 @@
   <a href="#zh">🇨🇳 中文</a> | <a href="#en">🇬🇧 English</a>
 </p>
 
+重启电脑后可先参考环境快速恢复手册：[reset.md](reset.md)
+
 <a id="zh"></a>
 
 <details open>
@@ -68,6 +70,49 @@
 2. **雷达链路断开，AMCL 没法工作**：AMCL 依赖 2D 雷达话题 `/scan`，但我们排查发现，`.usd` 场景保存后会把临时 `renderProductPath` 写成失效的绝对路径，重启后 2D 雷达渲染链路断掉，`/scan` 就没数据了。
 3. **换个思路：用 3D 雷达“压”出 2D 雷达**：与其死磕图形节点，不如直接用正常的 3D 点云话题 `/front_3d_lidar/lidar_points`，再用 `ros-humble-pointcloud-to-laserscan` 转成 2D 的 `/scan`。这样 AMCL 就能稳定收到数据，导航也恢复正常。
 
+
+## 2026-04-11: Node 4 大模型本地推理与视觉感知测试完成
+* **进展**：在原生 Linux 环境下，成功本地部署 **Qwen3-VL-2B-Instruct** 并完成仓库场景视觉理解测试。在 Isaac Sim 同时运行条件下，推理链路稳定，无显存抢占导致的崩溃。
+* **部署方式**：
+  * 运行环境：`isaaclab` Conda 环境。
+  * 关键依赖：`transformers` + `bitsandbytes`。
+  * 加载策略：4-bit 量化加载（NF4）+ `bfloat16` 计算。
+* **性能结果（当前机器）**：
+  * 显存占用约 1.5GB（模型侧）。
+  * 单次推理延迟约 1.2s（仓库截图场景，短文本输出）。
+  * 在 Isaac Sim + ROS 2 同时在线情况下可持续运行。
+
+### 为什么 Node 4 先用 2B，而不是 8B
+Node 4 的职责不是离线写长文，而是在线感知与导航链路中的实时语义解析。我们重点看的是“稳定 + 实时 + 可长期运行”，而不是单次极限精度。
+
+| 维度 | Qwen3-VL-2B-Instruct（当前采用） | 8B 级模型（评估结论） |
+| --- | --- | --- |
+| 显存压力 | 4-bit 后可控，能与 Isaac Sim 共存 | 即使量化后仍显著吃显存，容易与仿真争抢 |
+| 推理延迟 | 约 1.2s，满足 Node 4 在线节奏 | 延迟明显上升，影响实时闭环 |
+| 长时间稳定性 | 更容易稳定跑满全流程 | 更易触发 OOM 或性能抖动 |
+| 工程复杂度 | 直接落地，调度简单 | 需要更激进的内存和任务调度策略 |
+
+**结论**：Node 4 当前阶段优先采用 **Qwen3-VL-2B-Instruct**，以保证联调稳定和实时响应。
+
+**8B 的定位**：8B 不是放弃，而是作为后续增强方向。
+* 路线 A：在离线评估阶段引入 8B，对复杂场景描述质量做上限测试。
+* 路线 B：在后续硬件升级（更大显存）或双机分布式部署时，将 8B 作为高精度感知后端。
+* 路线 C：保留 2B 作为在线主模型，8B 作为低频复核模型（例如关键帧二次判读）。
+
+### 测试内容与结果
+* **多模态理解测试**：输入 Isaac Sim 仓库截图，要求模型识别机器人、办公椅、盆栽、紫色货箱并描述相对空间关系。
+* **空间方位验证**：模型能够稳定给出“机器人在椅子右侧”“盆栽在椅子左侧”“紫色盒子位于右侧货架”等关键关系，未出现明显方位性幻觉。
+* **工程结论**：当前模型可作为 Node 4 的可用版本，满足下一步桥接节点开发前的感知侧需求。
+
+#### Node 4 实验截图与推理结果
+![Node 4 推理结果展示](assets/node4_inference_result.png)
+
+注：上图为本地推理终端输出截图，展示了模型在仓库场景下的空间关系理解结果。
+
+* **下一步**：启动 Node 5，设计并实现 ROS 2 Interface Bridge，将大模型自然语言输出映射为 Nav2 可执行的 `Pose` 目标坐标。
+
+
+
 </details>
 
 <a id="en"></a>
@@ -122,6 +167,46 @@
 | 10 | (0.0, 2.0) | Success |
 
 **Summary**: 10 successes, 0 failures, overall success rate **100.0%**.
+
+## 2026-04-11: Node 4 Local VLM Inference & Visual Perception Test Completed
+* **Progress**: Successfully deployed **Qwen3-VL-2B-Instruct** locally in the native Linux environment and completed warehouse-scene visual understanding tests. The pipeline remained stable while Isaac Sim was running.
+* **Local deployment setup**:
+  * Environment: `isaaclab` Conda environment.
+  * Libraries: `transformers` and `bitsandbytes`.
+  * Optimization: 4-bit NF4 quantization with `bfloat16` compute.
+* **Observed performance (current laptop)**:
+  * Model-side VRAM usage around 1.5GB.
+  * Single-image inference latency around 1.2s.
+  * Stable coexistence with Isaac Sim + ROS 2 runtime.
+
+### Why Node 4 uses 2B first instead of 8B
+Node 4 serves online perception in a closed-loop robotics system. The first priority is stable real-time behavior rather than maximum offline benchmark quality.
+
+| Dimension | Qwen3-VL-2B-Instruct (current) | 8B-class model (evaluation) |
+| --- | --- | --- |
+| VRAM pressure | Controllable after 4-bit quantization | Much higher pressure, likely to compete with simulator |
+| Latency | Around 1.2s, acceptable for online use | Higher latency, hurts loop responsiveness |
+| Long-run stability | Easier to keep stable | More risk of OOM/performance jitter |
+| Engineering complexity | Straightforward integration | Requires more aggressive memory scheduling |
+
+**Decision**: Use **Qwen3-VL-2B-Instruct** as the Node 4 online model in the current phase.
+
+**Role of 8B in roadmap**:
+* Path A: Use 8B for offline quality benchmarking on hard cases.
+* Path B: Promote 8B to online inference after hardware upgrade or distributed deployment.
+* Path C: Keep 2B online and use 8B as a low-frequency verification model.
+
+### Test scope and findings
+* **Multimodal understanding**: Input warehouse screenshots and ask for object localization and spatial relations among robot, chair, plant, and purple boxes.
+* **Grounding quality**: The model consistently returned key relations such as “robot right of chair,” “plant left of chair,” and “purple boxes on the right shelf,” with no obvious spatial hallucinations.
+* **Engineering outcome**: Node 4 perception capability is ready for the next-stage bridge-node development.
+
+#### Node 4 Screenshot and Inference Output
+![Node 4 Inference Result](assets/node4_inference_result.png)
+
+Note: The screenshot shows real local inference output and validates usable spatial grounding in the warehouse scene.
+
+* **Next Step**: Start Node 5 and develop the ROS 2 Interface Bridge to convert natural-language outputs into Nav2-executable `Pose` targets.
 
 ### Simulation & Sensor Troubleshooting
 1. **Clock mismatch causing TF errors**: RViz2 initially used system wall time while Isaac Sim published simulation time, so TF messages were treated as expired. Setting `--ros-args -p use_sim_time:=True` fixed the timeline mismatch.
