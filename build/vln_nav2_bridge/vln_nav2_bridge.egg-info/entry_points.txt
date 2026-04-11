@@ -1,0 +1,3 @@
+[console_scripts]
+vln_node_local = vln_nav2_bridge.vln_node_local:main
+
